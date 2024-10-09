@@ -1,17 +1,27 @@
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <stdio.h>
-#include <netdb.h>
 #include <sys/ioctl.h>
+
+#if defined(__FreeBSD_kernel__) || defined(__APPLE__)
+        #include <net/if.h>
+#endif
+
+#if defined(__APPLE__)
+#include <netdb.h>
+#include <net/if_dl.h>
+#include <ifaddrs.h>
+#include <unistd.h>
+#include <net/if_types.h>  // Include this for IFT_ETHER
+
+struct if_stat *get_stats(const char *iface);
+#endif
 
 #if defined(__linux__)
 	#include <linux/sockios.h>
 	#include <linux/if.h>
-#endif
-
-#if defined(__FreeBSD_kernel__)
-	#include <net/if.h>
 #endif
 
 #include <netinet/in.h>
@@ -55,12 +65,19 @@ enum {
 };
 
 struct if_stat {
+#ifdef __APPLE__
+    char iface_name[IFNAMSIZ];
+    unsigned long long packets_received;
+    unsigned long long packets_sent;
+    unsigned long long bytes_received;
+    unsigned long long bytes_sent;
+    unsigned long long output_errors;
+#endif
 	unsigned long long in_packets, in_bytes, in_errors, in_drops;
 	unsigned long long in_fifo, in_frame, in_compress, in_multicast;
 	unsigned long long out_bytes, out_packets, out_errors, out_drops;
 	unsigned long long out_fifo, out_colls, out_carrier, out_multicast;
 };
-
 
 void print_quad_ipv4(in_addr_t i) {
 	i = ntohl(i);
@@ -77,12 +94,19 @@ void print_quad_ipv6(uint16_t *a) {
 }
 
 void print_quad(struct sockaddr *adr) {
+        uint16_t *ipv6_addr;
+
 	switch (adr->sa_family) {
 		case AF_INET:
 			print_quad_ipv4(((struct sockaddr_in*)adr)->sin_addr.s_addr);
 		break;
 		case AF_INET6:
+#ifdef __APPLE__
+            ipv6_addr = (uint16_t *)((struct sockaddr_in6*)adr)->sin6_addr.s6_addr;
+            print_quad_ipv6(ipv6_addr);
+#else
 			print_quad_ipv6(((struct sockaddr_in6*)adr)->sin6_addr.s6_addr16);
+#endif
 		break;
 	default:
 		printf("NON-IP");
@@ -128,8 +152,6 @@ int if_exists(const char *iface) {
 	return !do_socket_ioctl(iface, SIOCGIFFLAGS, &r, NULL, PRINT_NO_ERROR);
 }
 
-#if defined(__linux__)
-
 void if_flags(const char *iface) {
 	struct ifreq r;
 	unsigned int i;
@@ -147,12 +169,12 @@ void if_flags(const char *iface) {
 		{ IFF_NOARP,       "No-arp" },
 		{ IFF_PROMISC,     "Promiscuous" },
 		{ IFF_ALLMULTI,    "All-multicast" },
-		{ IFF_MASTER,      "Load-master" },
-		{ IFF_SLAVE,       "Load-slave" },
+		//{ IFF_MASTER,      "Load-master" },
+		//{ IFF_SLAVE,       "Load-slave" },
 		{ IFF_MULTICAST,   "Multicast" },
-		{ IFF_PORTSEL,     "Port-select" },
-		{ IFF_AUTOMEDIA,   "Auto-detect" },
-		{ IFF_DYNAMIC,     "Dynaddr" },
+		//{ IFF_PORTSEL,     "Port-select" },
+		//{ IFF_AUTOMEDIA,   "Auto-detect" },
+		//{ IFF_DYNAMIC,     "Dynaddr" },
 		{ 0xffff0000,      "Unknown-flags" },
 	};
 
@@ -165,6 +187,7 @@ void if_flags(const char *iface) {
 		       sizeof(flags) / sizeof(flags[0]) - 1 == i ? "" : "\n");
 }
 
+#if defined(__linux__) && !(__APPLE__)
 void if_hwaddr(const char *iface) {
 	struct ifreq r;
 	unsigned char *hwaddr;
@@ -176,7 +199,41 @@ void if_hwaddr(const char *iface) {
 	printf("%02X:%02X:%02X:%02X:%02X:%02X",
 	       hwaddr[0], hwaddr[1], hwaddr[2], hwaddr[3], hwaddr[4], hwaddr[5]);
 }
+#endif
 
+#ifdef __APPLE__ 
+void if_hwaddr(const char *iface) {
+    struct ifaddrs *ifap, *ifa;
+    struct sockaddr_dl *sdl;
+    unsigned char *mac_addr;
+    
+    if (getifaddrs(&ifap) != 0) {
+        perror("getifaddrs");
+        exit(EXIT_FAILURE);
+    }
+
+    for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr != NULL && ifa->ifa_addr->sa_family == AF_LINK) {
+            sdl = (struct sockaddr_dl *)ifa->ifa_addr;
+            if (strcmp(ifa->ifa_name, iface) == 0 && sdl->sdl_type == IFT_ETHER) {
+                mac_addr = (unsigned char *)LLADDR(sdl);
+                printf("MAC address of %s: %02x:%02x:%02x:%02x:%02x:%02x\n", iface,
+                    mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+                break;
+            }
+        }
+    }
+
+    freeifaddrs(ifap);
+}
+#endif /* __APPLE__ */
+
+
+#if __TESTS__
+int test_if_hwaddr() {
+    if_hwaddr("en0");  // Replace "en0" with your network interface
+    return 0;
+}
 #endif
 
 static struct sockaddr *if_addr_value(const char *iface, struct ifreq *r, 
@@ -229,15 +286,16 @@ int if_mtu(const char *iface) {
 	return req.ifr_mtu;
 }
 
-#if defined(__linux__)
-
+#if defined(__linux__) || defined(__APPLE__)
 static void skipline(FILE *fd) {
 	int ch;
 	do {
 		ch = getc(fd);
 	} while (ch != '\n' && ch != EOF);
 }
+#endif
 
+#if defined(__linux__) && !(__APPLE__)
 struct if_stat *get_stats(const char *iface) {
 	FILE *fd;
 	struct if_stat *ifstat;
@@ -290,8 +348,71 @@ struct if_stat *get_stats(const char *iface) {
 	free(ifstat);
 	return NULL;
 }
-
 #endif
+#if defined(__APPLE__)
+// Function to gather network statistics
+struct if_stat *get_stats(const char *iface) {
+    struct ifaddrs *ifap, *ifa;
+    struct if_data *if_data;
+    struct if_stat *ifstat;
+
+    ifstat = malloc(sizeof(struct if_stat));
+    if (ifstat == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+
+    if (getifaddrs(&ifap) != 0) {
+        perror("getifaddrs");
+        free(ifstat);
+        return NULL;
+    }
+
+    for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr != NULL && ifa->ifa_addr->sa_family == AF_LINK) {
+            if (strcmp(ifa->ifa_name, iface) == 0) {
+                if_data = (struct if_data *)ifa->ifa_data;
+                if (if_data != NULL) {
+                    strncpy(ifstat->iface_name, iface, IFNAMSIZ - 1);
+                    ifstat->iface_name[IFNAMSIZ - 1] = '\0';
+                    ifstat->packets_received = if_data->ifi_ipackets;
+                    ifstat->packets_sent = if_data->ifi_opackets;
+                    ifstat->bytes_received = if_data->ifi_ibytes;
+                    ifstat->bytes_sent = if_data->ifi_obytes;
+                    ifstat->in_errors = if_data->ifi_ierrors;
+                    ifstat->output_errors = if_data->ifi_oerrors;
+                    break;
+                }
+            }
+        }
+    }
+
+    freeifaddrs(ifap);
+    return ifstat;
+}
+#endif
+
+#ifdef __TESTS__ 
+int main() {
+    struct if_stat *stat = get_network_stats("en0");  // Replace "en0" with your network interface
+
+    if (stat != NULL) {
+        printf("Interface: %s\n", stat->iface_name);
+        printf("Packets received: %llu\n", stat->packets_received);
+        printf("Packets sent: %llu\n", stat->packets_sent);
+        printf("Bytes received: %llu\n", stat->bytes_received);
+        printf("Bytes sent: %llu\n", stat->bytes_sent);
+        printf("Input errors: %llu\n", stat->input_errors);
+        printf("Output errors: %llu\n", stat->output_errors);
+        free(stat);  // Don't forget to free the allocated memory
+    } else {
+        printf("Failed to get network statistics.\n");
+    }
+
+    return 0;
+}
+#endif
+
 
 const struct {
 	char *option;
@@ -307,7 +428,7 @@ const struct {
 	{ "-pN",  DO_PNETWORK,      0, "Print network address" },
 	{ "-pb",  DO_PCAST,         0, "Print broadcast" },
 	{ "-pm",  DO_PMTU,          0, "Print mtu" },
-#if defined(__linux__)
+//#if defined(__linux__)
 	{ "-ph",  DO_PHWADDRESS,    0, "Print out the hardware address" },
 	{ "-pf",  DO_PFLAGS,        0, "Print flags" },
 	{ "-si",  DO_SINALL,        1, "Print all statistics on input" },
@@ -329,7 +450,7 @@ const struct {
 	{ "-som", DO_SOUTMULTICAST, 1, "Print # of out multicast" },
 	{ "-bips",DO_BIPS,          1, "Print # of incoming bytes per second" },
 	{ "-bops",DO_BOPS,          1, "Print # of outgoing bytes per second" },
-#endif
+//#endif
 };
 
 void usage(const char *name) {
@@ -533,12 +654,12 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-#if defined(__linux__)
+//#if defined(__linux__)
 	if (do_stats && (ifstats = get_stats(ifname)) == NULL) {
 		fprintf(stderr, "Error getting statistics for %s\n", ifname);
 		return 1;
 	}
-#endif
+//#endif
 
 	please_do(ndo, todo, ifname);
 

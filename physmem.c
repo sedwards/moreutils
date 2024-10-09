@@ -280,7 +280,7 @@ physmem_available (void)
 }
 
 
-#if DEBUG
+//#if DEBUG
 
 # include <stdio.h>
 # include <stdlib.h>
@@ -288,11 +288,29 @@ physmem_available (void)
 int
 main (void)
 {
+  int gb_avail;
+  int gb_total;
+  double mem_avail;
+  double mem_total;
+
   printf ("%12.f %12.f\n", physmem_total (), physmem_available ());
+
+  mem_total = physmem_total(); 
+  gb_avail = physmem_available(); 
+
+  gb_total = (mem_total / 1024 / 1024);
+  gb_avail = (mem_avail / 1024 / 1024);
+
+  printf("%lf mem-total \n" , mem_total ); 
+  printf("%d gb total system memory\n" , gb_total );
+
+  printf("%f mem avalible \n" , mem_avail ); 
+  printf("%d gb total memory aval\n" , gb_avail ); 
+
   exit (0);
 }
 
-#endif /* DEBUG */
+//#endif /* DEBUG */
 
 /*
 Local Variables:
